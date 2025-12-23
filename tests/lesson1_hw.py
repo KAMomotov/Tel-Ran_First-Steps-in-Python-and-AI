@@ -1,10 +1,11 @@
 import io
 import json
 import sys
-import types
 import pytest
 
-import lesson1.hw as app  # <-- если модуль называется иначе, поменяй тут
+import lesson1.hw as app
+
+from datetime import datetime as real_datetime
 
 
 # --------------------
@@ -29,13 +30,28 @@ class RandBelowSeq:
 
 
 @pytest.fixture
-def io_env(monkeypatch):
+def app_out(monkeypatch):
     """
-    Изолируем stdin/stdout для каждого теста.
+    Перехватываем вывод приложения, подменяя app.stdout().
+    Фейковая функция уважает параметр file=..., чтобы unit-тесты stdout() не ломались.
     """
-    out = io.StringIO()
-    monkeypatch.setattr(sys, "stdout", out)
-    return out
+    buf = io.StringIO()
+
+    def fake_stdout(*args, sep=" ", end="\n", file=None, flush=False):
+        text = sep.join(map(str, args)) + end
+
+        # ВАЖНО: если file передан — пишем туда (как настоящая stdout()).
+        if file is not None:
+            file.write(text)
+            if flush and hasattr(file, "flush"):
+                file.flush()
+            return
+
+        # иначе пишем в общий буфер (перехват "консольного" вывода приложения)
+        buf.write(text)
+
+    monkeypatch.setattr(app, "stdout", fake_stdout)
+    return buf
 
 
 @pytest.fixture
@@ -57,23 +73,21 @@ def deterministic_secrets(monkeypatch):
 @pytest.fixture
 def fixed_datetime(monkeypatch):
     """
-    Фиксируем created_at, чтобы тесты не зависели от времени.
-    Подстраховка: работает и для datetime.utcnow(), и для datetime.now(timezone.utc),
-    в зависимости от того, какую реализацию ты оставил.
+    Фиксируем время в модуле приложения, не ломая конструктор datetime.
+    Подменяем app.datetime на объект с .now/.utcnow, которые возвращают real_datetime.
     """
     class FakeDT:
         @staticmethod
         def utcnow():
-            # если у тебя еще utcnow()
-            return app.datetime(2025, 1, 1, 0, 0, 0)
+            # на случай, если где-то остался utcnow()
+            return real_datetime(2025, 1, 1, 0, 0, 0)
 
         @staticmethod
         def now(tz=None):
             if tz is None:
-                return app.datetime(2025, 1, 1, 0, 0, 0)
-            return app.datetime(2025, 1, 1, 0, 0, 0, tzinfo=tz)
+                return real_datetime(2025, 1, 1, 0, 0, 0)
+            return real_datetime(2025, 1, 1, 0, 0, 0, tzinfo=tz)
 
-    # подменяем имя datetime внутри модуля
     monkeypatch.setattr(app, "datetime", FakeDT)
 
 
@@ -86,7 +100,7 @@ def read_json(path: str) -> dict:
 # Tests: stdout/stdin
 # --------------------
 
-def test_stdout_basic(io_env):
+def test_stdout_basic(app_out):
     out = io.StringIO()
     app.stdout("a", 1, 2, file=out)
     assert out.getvalue() == "a 1 2\n"
@@ -108,17 +122,17 @@ def test_stdout_sep_end_flush_called():
     assert spy.flush_calls == 1
 
 
-def test_stdin_reads_and_strips_lf(monkeypatch, io_env):
+def test_stdin_reads_and_strips_lf(monkeypatch, app_out):
     monkeypatch.setattr(sys, "stdin", feed_stdin(["hello"]))
     assert app.stdin(out=sys.stdout) == "hello"
 
 
-def test_stdin_strips_crlf(monkeypatch, io_env):
+def test_stdin_strips_crlf(monkeypatch, app_out):
     monkeypatch.setattr(sys, "stdin", io.StringIO("hello\r\n"))
     assert app.stdin(out=sys.stdout) == "hello"
 
 
-def test_stdin_eof_raises(monkeypatch, io_env):
+def test_stdin_eof_raises(monkeypatch, app_out):
     monkeypatch.setattr(sys, "stdin", io.StringIO(""))
     with pytest.raises(EOFError):
         app.stdin(out=sys.stdout)
@@ -179,7 +193,7 @@ def test_storage_generate_unique_account_number(storage, monkeypatch):
 # Tests: ConsoleView
 # --------------------
 
-def test_view_ask_digits_validation(monkeypatch, io_env):
+def test_view_ask_digits_validation(monkeypatch, app_out):
     v = app.ConsoleView()
     # сначала вводим "abc" (ошибка), потом "12" (корректно)
     monkeypatch.setattr(sys, "stdin", feed_stdin(["abc", "12"]))
@@ -187,14 +201,14 @@ def test_view_ask_digits_validation(monkeypatch, io_env):
     assert got == "12"
 
 
-def test_view_ask_money_amount_parsing(monkeypatch, io_env):
+def test_view_ask_money_amount_parsing(monkeypatch, app_out):
     v = app.ConsoleView()
     monkeypatch.setattr(sys, "stdin", feed_stdin(["100,50"]))
     cents = v.ask_money_amount("Сколько?")
     assert cents == 10050
 
 
-def test_view_ask_pin_create_two_steps(monkeypatch, io_env):
+def test_view_ask_pin_create_two_steps(monkeypatch, app_out):
     v = app.ConsoleView()
     # pin1 != pin2, потом совпали
     monkeypatch.setattr(sys, "stdin", feed_stdin(["1111", "2222", "1234", "1234"]))
@@ -207,7 +221,7 @@ def test_view_ask_pin_create_two_steps(monkeypatch, io_env):
 # --------------------
 
 def test_first_run_creates_account_and_deposits_then_exit(
-    monkeypatch, io_env, storage, deterministic_secrets, fixed_datetime
+    monkeypatch, app_out, storage, deterministic_secrets, fixed_datetime
 ):
     """
     Первый запуск: нет аккаунтов -> создание -> первичный депозит -> меню -> выход
@@ -247,14 +261,14 @@ def test_first_run_creates_account_and_deposits_then_exit(
     assert acc_raw["name"] == "Kirill"
     assert acc_raw["balance_cents"] == 1000
 
-    out_text = io_env.getvalue()
+    out_text = app_out.getvalue()
     assert "Счёт создан" in out_text
     assert "Ваш номер счёта: 0000000123" in out_text
     assert "Текущий баланс: 10.00" in out_text
 
 
 def test_login_success_deposit_withdraw_and_exit(
-    monkeypatch, io_env, storage, deterministic_secrets, fixed_datetime
+    monkeypatch, app_out, storage, deterministic_secrets, fixed_datetime
 ):
     """
     Не первый запуск:
@@ -304,7 +318,7 @@ def test_login_success_deposit_withdraw_and_exit(
     assert loaded is not None
     assert loaded.balance_cents == 300  # 5.00 - 2.00
 
-    out_text = io_env.getvalue()
+    out_text = app_out.getvalue()
     assert "Успешный вход" in out_text
     assert "Зачислено: 5.00" in out_text
     assert "Выдано: 2.00" in out_text
@@ -312,7 +326,7 @@ def test_login_success_deposit_withdraw_and_exit(
 
 
 def test_login_wrong_pin_then_exit(
-    monkeypatch, io_env, storage, deterministic_secrets, fixed_datetime
+    monkeypatch, app_out, storage, deterministic_secrets, fixed_datetime
 ):
     view = app.ConsoleView()
     controller = app.ATMController(storage, view)
@@ -340,11 +354,11 @@ def test_login_wrong_pin_then_exit(
     )
 
     controller.run()
-    assert "Неверный PIN" in io_env.getvalue()
+    assert "Неверный PIN" in app_out.getvalue()
 
 
 def test_withdraw_insufficient_funds_branch(
-    monkeypatch, io_env, storage, deterministic_secrets, fixed_datetime
+    monkeypatch, app_out, storage, deterministic_secrets, fixed_datetime
 ):
     view = app.ConsoleView()
     controller = app.ATMController(storage, view)
@@ -372,11 +386,11 @@ def test_withdraw_insufficient_funds_branch(
     )
     controller.flow_session(acc)
 
-    out_text = io_env.getvalue()
+    out_text = app_out.getvalue()
     assert "Недостаточно средств" in out_text
 
 
-def test_keyboardinterrupt_propagates_from_stdin(monkeypatch, io_env):
+def test_keyboardinterrupt_propagates_from_stdin(monkeypatch, app_out):
     """
     Подтверждаем контракт: KeyboardInterrupt не перехватывается stdin().
     """
