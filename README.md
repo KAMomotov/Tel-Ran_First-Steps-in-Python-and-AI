@@ -7,7 +7,7 @@
 > 
 
 ## Программа занятий:
-- Урок 1: Основы Python
+- [Урок 1: Основы Python](https://github.com/KAMomotov/Tel-Ran_First-Steps-in-Python-and-AI/blob/main/lesson1/README.md)
     - Ввод и вывод данных
     - Переменные
 - Урок 2: Логика в Python 
