@@ -32,7 +32,7 @@ from decimal import Decimal, InvalidOperation
 # I/O helpers (stdin/stdout)
 # =========================
 
-from lesson1.io import stdout, stdin
+from lesson1 import stdout, stdin
 
 
 # =========
