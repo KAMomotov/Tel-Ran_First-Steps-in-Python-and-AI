@@ -115,14 +115,17 @@ def create_run_logger(log_dir: str | Path = "logs") -> logging.Logger:
     log_path = Path(log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Микросекунды -> уникально для быстрых тестов
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     filename = log_path / f"run_{ts}.log"
 
     logger = logging.getLogger(f"SmartFanRun_{ts}")
     logger.setLevel(logging.INFO)
     logger.propagate = False
 
-    # На случай повторного создания в тестах/REPL — не плодим хендлеры
+    # сохраним путь к лог-файлу, чтобы export мог положить файл рядом
+    logger.log_file = filename  # type: ignore[attr-defined]
+
     if not logger.handlers:
         handler = logging.FileHandler(filename, encoding="utf-8")
         formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
@@ -209,6 +212,37 @@ class SmartFanApp:
         lines.append(f"  Energy (model): {self.stats.energy_wh():.2f} Wh")
         return lines
 
+    def current_power_w(self) -> int:
+        return MODE_WATTS.get(self.fan.mode, 0)
+
+    def power_lines(self) -> list[str]:
+        # обновим накопленное время/энергию до текущего момента
+        self.stats.finalize(self.now())
+        return [
+            "Power:",
+            f"  Mode: {self.fan.mode} ({self.fan.status()})",
+            f"  Current: {self.current_power_w()} W",
+            f"  Energy (model): {self.stats.energy_wh():.2f} Wh",
+        ]
+
+    def export_stats(self) -> Path:
+        """
+        Пишет статистику в файл рядом с логом запуска.
+        Возвращает путь к экспортированному файлу.
+        """
+        log_file: Path = getattr(self.logger, "log_file", Path("run.log"))  # type: ignore[assignment]
+        export_file = log_file.with_name(f"{log_file.stem}_stats.txt")
+
+        content_lines: list[str] = []
+        content_lines.extend(self.stats_lines())
+        content_lines.append("")
+        content_lines.append("History (last 50):")
+        content_lines.extend(self.history_lines(last=50) or ["<empty>"])
+
+        export_file.write_text("\n".join(content_lines) + "\n", encoding="utf-8")
+        self.logger.info("EXPORT | %s", export_file)
+        return export_file
+
     @staticmethod
     def help_text() -> str:
         return (
@@ -217,11 +251,14 @@ class SmartFanApp:
             "  up        - increase mode by 1 (max 3)\n"
             "  down      - decrease mode by 1 (min 0)\n"
             "  status    - show current mode\n"
+            "  power     - show current watts and accumulated Wh\n"
             "  history   - show last 10 changes\n"
             "  stats     - show statistics (time, turbo count, energy)\n"
+            "  export    - save stats to a file next to the log\n"
             "  help      - show this help\n"
             "  q / quit  - exit\n"
         )
+
 
 
 # =========================
@@ -270,6 +307,15 @@ def run_cli(
 
         if raw == "stats":
             output_func("\n".join(app.stats_lines()))
+            continue
+
+        if raw == "power":
+            output_func("\n".join(app.power_lines()))
+            continue
+
+        if raw == "export":
+            path = app.export_stats()
+            output_func(f"Exported to: {path}")
             continue
 
         # режим 0..3

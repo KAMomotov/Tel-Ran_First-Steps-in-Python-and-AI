@@ -1,6 +1,6 @@
 import pytest
 
-from lesson2.hw import Fan, SmartFanApp, MODE_LABELS, create_run_logger
+from lesson2.hw import Fan, SmartFanApp, MODE_LABELS, create_run_logger, run_cli
 
 
 class FakeClock:
@@ -15,13 +15,9 @@ class FakeClock:
 
 
 def make_app(tmp_path, clock: FakeClock) -> SmartFanApp:
-    # Логгер в temp-папку: чтобы тесты не писали “в проект”
     logger = create_run_logger(tmp_path)
+    return SmartFanApp(logger=logger, now=clock.now)
 
-    return SmartFanApp(
-        logger=logger,
-        now=clock.now,
-    )
 
 
 # -----------------------
@@ -133,3 +129,61 @@ def test_history_lines_format(tmp_path):
     assert len(lines) == 2
     assert "SET: 0 -> 1" in lines[0]
     assert "SET: 1 -> 2" in lines[1]
+
+
+def test_cli_flow_with_power_and_export(tmp_path, capsys):
+    clock = FakeClock(0.0)
+    app = make_app(tmp_path, clock)
+
+    commands = iter([
+        "status",
+        "1",
+        "up",
+        "power",
+        "stats",
+        "export",
+        "history",
+        "quit",
+    ])
+
+    def fake_input(_prompt="> "):
+        clock.advance(10.0)
+        return next(commands)
+
+    run_cli(app, input_func=fake_input)
+    out = capsys.readouterr().out
+
+    assert "Smart Fan Controller" in out
+    assert "Mode: 0" in out
+    assert "Mode: 1" in out
+    assert "Mode: 2" in out
+    assert "Power:" in out
+    assert "Current:" in out
+    assert "Energy (model):" in out
+    assert "Stats:" in out
+    assert "Exported to:" in out
+    assert "Bye!" in out
+
+    log_file = getattr(app.logger, "log_file")
+    export_file = log_file.with_name(f"{log_file.stem}_stats.txt")
+    assert export_file.exists()
+
+    text = export_file.read_text(encoding="utf-8")
+    assert "Stats:" in text
+    assert "Energy (model)" in text
+    assert "History" in text
+
+
+def test_cli_unknown_command(tmp_path, capsys):
+    clock = FakeClock(0.0)
+    app = make_app(tmp_path, clock)
+
+    commands = iter(["abracadabra", "q"])
+
+    def fake_input(_prompt="> "):
+        clock.advance(1.0)
+        return next(commands)
+
+    run_cli(app, input_func=fake_input)
+    out = capsys.readouterr().out
+    assert "Unknown command" in out
